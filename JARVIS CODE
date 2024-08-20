@@ -1,0 +1,422 @@
+#   Initializing all imports
+import requests
+import os
+from playsound import playsound
+from gtts import gTTS
+from io import BytesIO
+from g4f.client import Client
+import speech_recognition as sr
+import time
+import random
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+import openmeteo_requests
+import requests_cache
+import pandas as pd
+from retry_requests import retry
+import requests
+from datetime import datetime
+import tkinter as tk
+from tkinter import scrolledtext
+import threading
+import queue
+
+event_queue = queue.Queue()
+
+# Define check_for_enter_to_pause function
+
+def check_for_enter_to_pause(gui):
+    while gui.running:
+        if not event_queue.empty() and event_queue.get() == "pause":
+            sp.pause_playback()
+            break
+
+#   Initializing JARVIS and text generation capabilitities
+
+class Speaker:
+    def __init__(self, name):
+        self.name = name
+
+    def generate_speech(self, text, voice_id='Will', bitrate='192k', speed='0.2', pitch='1', codec='libmp3lame'):
+        try:
+            response = requests.post(
+                'https://api.v7.unrealspeech.com/stream',
+                headers={
+                    'Authorization': 'Bearer ENTER-CODE-HERE'
+                },
+                json={
+                    'Text': text,
+                    'VoiceId': voice_id,
+                    'Bitrate': bitrate,
+                    'Speed': speed,
+                    'Pitch': pitch,
+                    'Codec': codec,
+                }
+            )
+            if response.status_code == 200:
+                with open('audio.mp3', 'wb') as f:
+                    f.write(response.content)
+                playsound('audio.mp3')
+                os.remove('audio.mp3')
+            else:
+                print(f"Failed to generate speech: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+#   Initializing speech from user
+def recognize_speech_from_mic(recognizer, microphone):
+    if not isinstance(recognizer, sr.Recognizer):
+        raise TypeError("recognizer must be Recognizer instance")
+    if not isinstance(microphone, sr.Microphone):
+        raise TypeError("microphone must be Microphone instance")
+    
+    with microphone as source:
+        recognizer.adjust_for_ambient_noise(source)
+        print("JARVIS is Listening...")
+        gui.add_text("JARVIS is Listening...")
+        audio = recognizer.listen(source)
+    
+    response = {
+        "success": True,
+        "error": None,
+        "transcription": None
+    }
+    
+    try:
+        response["transcription"] = recognizer.recognize_google(audio)
+    except sr.RequestError:
+        response["success"] = False
+        response["error"] = "JARVIS is down right now. Try again soon, sir."
+    except sr.UnknownValueError:
+        response["error"] = "I couldn't understand that, sir. Mind repeating it?"
+
+    return response
+
+
+#   Initializing SPOTIFY
+
+client_id = 'INSERT-CLIENT-ID-HERE'
+client_secret = 'INSERT-CLIENT-SECRET-HERE'
+redirect_uri = 'http://localhost:8888/callback/'
+scope = 'user-library-read user-modify-playback-state user-read-playback-state user-read-private user-top-read'
+sp = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri, scope=scope))
+
+def get_playlist_tracks(playlist_id):
+    results = sp.playlist_tracks(playlist_id)
+    tracks = results['items']
+    
+    while results['next']:
+        results = sp.next(results)
+        tracks.extend(results['items'])
+
+    return [track['track']['uri'] for track in tracks]
+
+def shuffle_play_playlist(playlist_id):
+    track_uris = get_playlist_tracks(playlist_id)
+    if track_uris:
+        random.shuffle(track_uris)
+        sp.start_playback(uris=track_uris)
+        print("Shuffled and playing songs from your playlist.")
+    else:
+        print("No tracks found in the playlist.")
+
+def check_for_enter_to_pause(gui):
+    print("Press Enter to pause the music...")
+    while gui.running:
+        if not event_queue.empty() and event_queue.get() == "pause":
+            sp.pause_playback()
+            print("Music paused.")
+            break
+
+event_queue = queue.Queue()
+
+#   Initializing weather API
+
+def celsius_to_fahrenheit(celsius):
+    return (celsius * 9/5) + 32
+
+url = "https://api.open-meteo.com/v1/forecast"
+params = {
+        "latitude": 39.2904,
+        "longitude": -76.6122,
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "current_weather": True,
+        "timezone": "America/New_York"
+    }
+response = requests.get(url, params=params)
+if response.status_code == 200:
+        data = response.json()
+        current_temp_celsius = data.get('current_weather', {}).get('temperature')
+        max_temp_celsius = data.get('daily', {}).get('temperature_2m_max', [None])[0]
+        min_temp_celsius = data.get('daily', {}).get('temperature_2m_min', [None])[0]
+
+        if current_temp_celsius is not None:
+            current_temp_fahrenheit = celsius_to_fahrenheit(current_temp_celsius)
+        else:
+            print("Current temperature data is not available.")
+
+        if max_temp_celsius is not None:
+            max_temp_fahrenheit = celsius_to_fahrenheit(max_temp_celsius)
+        else:
+            print("High temperature data is not available.")
+
+        if min_temp_celsius is not None:
+            min_temp_fahrenheit = celsius_to_fahrenheit(min_temp_celsius)
+        else:
+            print("Low temperature data is not available.")
+else:
+        print(f"Failed to fetch data: {response.status_code}")
+
+
+#   initializing news API:
+
+api_key = 'NEWS-API-KEY'
+url = 'https://api.thenewsapi.com/v1/news/all'
+params = {
+    'api_token': api_key,
+    'categories': 'politics',
+    'limit': 3,
+    'sort_by': 'published_at',
+    'language': 'en'
+      }
+def fetch_headlines():
+    response = requests.get(url, params=params)
+    data = response.json()
+    
+    if response.status_code == 200 and 'data' in data:
+        headlines = [article['title'] for article in data['data']]
+        return headlines
+    else:
+        print("Failed to fetch news. Status code:", response.status_code)
+        return []
+
+
+#   Function to listen for the wake word
+def listen_for_wake_word(recognizer, microphone):
+    print("Listening for 'JARVIS'...")
+    while True:
+        with microphone as source:
+            recognizer.adjust_for_ambient_noise(source)
+            audio = recognizer.listen(source)
+        try:
+            text = recognizer.recognize_google(audio)
+            if "jarvis" in text.lower():
+                print("JARVIS is online and active.")
+                return True
+        except sr.UnknownValueError:
+            pass
+        except sr.RequestError as e:
+            print(f"Could not request results from Google Speech Recognition service; {e}")
+            return False
+        
+#   Initializing actual GPT ability
+def chat_with_gpt(gui):
+    recognizer = sr.Recognizer()
+    microphone = sr.Microphone()
+    speaker = Speaker("JARVIS")
+    client = Client()
+
+    killjoy_phrase = [
+        "override", "over ride"
+    ]
+
+    termination_phrases = [
+        "clear", "goodbye", "farewell", "adios", "deuces", "leave me alone", 
+        "self destruct",  "self destruct", "that's all", "that will be all", "thank you", "explode", 
+        "bye", "bye bye", "go away", "sick of you", "fuck off", "fuck you", "rot"
+    ]
+
+    spotify_phrases = [
+        "music", "spotify", "tunes", "song"
+    ]
+
+    weather_phrases = [
+        "weather", "temperature"
+    ]
+
+    news_phrase = [
+        "news", "headlines", "jew topics"
+    ]
+
+    maya_phrase = [
+        "girlfriend", "best friend", "my love", "cutie", "sweetheart"
+    ]
+
+    family_phrase = [
+        "titiksha", "appa", "amma", "subha", "babu", "sister", "dad", "mom"
+    ]
+
+    while gui.running:
+        if listen_for_wake_word(recognizer, microphone):
+            gui.add_text("JARVIS: At your service sir, how may I assist you?")            
+            speaker.generate_speech("At your service sir, how may I assist you?")
+            conversation_history = [{"role": "assistant", "content": "At your service sir, how may I assist you?"}]
+            print("JARVIS:", conversation_history[0]["content"])
+
+            while gui.running:
+                if gui.stop_chat:
+                    gui.add_text("JARVIS: Stopping chat.")
+                    break
+
+                response = recognize_speech_from_mic(recognizer, microphone)
+
+                result = recognize_speech_from_mic(recognizer, microphone)
+                if result["success"]:
+                    user_input = result["transcription"]
+                    if user_input: 
+                        gui.add_text(f"You said: {user_input}")
+                        print("You said: ", user_input)
+                        
+                        if any(phrase in user_input.lower() for phrase in killjoy_phrase):
+                            gui.add_text("JARVIS: A pleasure as always, sir. System down.")                            
+                            speaker.generate_speech("A pleasure as always, sir. System down.")
+                            gui.running = False
+                            exit()
+
+                        if any(phrase in user_input.lower() for phrase in termination_phrases):                           
+                            gui.add_text("JARVIS: A pleasure as always, sir.")
+                            speaker.generate_speech("A pleasure as always, sir.")
+                            break
+
+                        if any(phrase in user_input.lower() for phrase in spotify_phrases):
+                            playlist_id = 'INSERT-PLAYLIST-ID'
+                            shuffle_play_playlist(playlist_id)
+                            gui.add_text("JARVIS: Music? Not a problem, sir. Enjoy!")
+                            speaker.generate_speech("Music? Not a problem sir. Enjoy!")
+                            speaker.generate_speech("Press Enter to pause the music...")
+                            check_for_enter_to_pause(gui)
+                            continue
+
+                        if any(phrase in user_input.lower() for phrase in weather_phrases): 
+                            speaker.generate_speech(f"Today in Baltimore, it's {current_temp_fahrenheit:.2f}°F")
+                            speaker.generate_speech(f"It'll be a high of {max_temp_fahrenheit:.2f}°F")
+                            speaker.generate_speech(f"and a low of {min_temp_fahrenheit:.2f}°F. Maybe it's hot. Maybe it's cold. I don't know this was hard-programmed into me because you don't know how to code! Wait... That was a poem! Or a haiku! I'm not sure actually...")
+                            gui.add_text(f"JARVIS: Today in Baltimore, it's {current_temp_fahrenheit:.2f}°F"
+                                         f"It'll be a high of {max_temp_fahrenheit:.2f}°F"
+                                         f"and a low of {min_temp_fahrenheit:.2f}°F. Maybe it's hot. Maybe it's cold. I don't know this was hard-programmed into me because you don't know how to code! Wait... That was a poem! Or a haiku! I'm not sure actually...")
+                            continue
+
+                        if any(phrase in user_input.lower() for phrase in news_phrase):
+                            headlines = fetch_headlines()
+                            if headlines: 
+                                for index, headline in enumerate(headlines):
+                                    gui.add_text("JARVIS: Today's top stories are:")  
+                                    speaker.generate_speech("Today's top stories are:")                              
+                                    speaker.generate_speech(f"Headline {index + 1}: {headline}")
+                                continue
+                            else:
+                                gui.add_text("JARVIS: Not working at the moment, sir. There must be something going on though!")  
+                                speaker.generate_speech("Not working at the moment, sir. There must be something going on though!")                              
+                                
+                        if any(phrase in user_input.lower() for phrase in maya_phrase):
+                            gui.add_text("""
+                                JARVIS: Hi Maya! I'm happy you found my easter egg. You can call yourself a few of the nicknames I call you. 
+                                This assistant was made for you! Enjoy it. Go ahead! Ask me a question!
+                            """)
+                            speaker.generate_speech("""
+                                Hi Maya! I'm happy you found my easter egg. You can call yourself a few of the nicknames I call you. 
+                                This assistant was made for you! Enjoy it. Go ahead! Ask me a question!
+                            """)
+                            break
+
+                        if any(phrase in user_input.lower() for phrase in family_phrase):
+                            gui.add_text("""
+                                Hi Amma, Appa, or Titiksha! You guys inspired me to do my best to do whatever I put my mind to. 
+                                I created this thing to prove that I can do whatever I want with my mind. Go ahead! Use my tool.
+                            """)
+                            speaker.generate_speech("""
+                                Hi Amma, Appa, or Titiksha! You guys inspired me to do my best to do whatever I put my mind to. 
+                                I created this thing to prove that I can do whatever I want with my mind. Go ahead! Use my tool.
+                            """)
+                            break
+
+                        conversation_history.append({"role": "user", "content": user_input})
+                        response = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=conversation_history
+                        )
+                        reply = response.choices[0].message.content
+                        print("JARVIS:", reply)
+                        gui.add_text(f"JARVIS: {reply}")
+                        speaker.generate_speech(reply)
+                        conversation_history.append({"role": "assistant", "content": reply})
+                    
+                    if gui.stop_chat:
+                        gui.add_text("JARVIS: Stopped. Back to listening mode.")
+                        speaker.generate_speech("Stopped. Back to listening mode.")
+                        gui.stop_chat = False
+                        
+                else:
+                    speaker.speak("Nothing was said, sir. Farewell.")
+                    exit()
+
+
+#GUI INTEG
+from tkhtmlview import HTMLLabel
+class JarvisGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("JARVIS")
+        self.root.geometry("800x600")
+        self.center_window()
+
+        self.root.configure(bg="#1e1e1e")
+        self.font = ("Helvetica", 12)
+        
+        self.chat_window = scrolledtext.ScrolledText(root, wrap=tk.WORD, bg="#2e2e2e", fg="#e0e0e0", font=self.font, borderwidth=0, highlightthickness=0)
+        self.chat_window.pack(expand=True, fill='both', padx=20, pady=20)
+        self.chat_window.config(state=tk.DISABLED)
+
+        self.start_button = tk.Button(root, text="Start JARVIS", command=self.start_jarvis, bg="#00ff00", fg="#000000", font=("Arial", 14, 'bold'), relief=tk.FLAT, padx=20, pady=10)
+        self.start_button.pack(side=tk.LEFT, padx=20, pady=20)
+
+        self.stop_button = tk.Button(root, text="Stop JARVIS", command=self.stop_jarvis, bg="#ff0000", fg="#000000", font=("Arial", 14, 'bold'), relief=tk.FLAT, padx=20, pady=10, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.RIGHT, padx=20, pady=20)
+
+        self.spotify_frame = HTMLLabel(root, html='<iframe style="border-radius:12px" src="PLAYLIST-LINK" width="100%" height="352" frameBorder="0" allowfullscreen="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>')
+        self.spotify_frame.pack(expand=True, fill='both', padx=20, pady=10)
+
+        self.running = False
+        self.stop_chat = False
+        self.root.bind('<Return>', self.on_enter_pressed)
+
+    def add_text(self, text):
+        self.chat_window.config(state=tk.NORMAL)
+        self.chat_window.insert(tk.END, text + "\n")
+        self.chat_window.yview(tk.END)
+        self.chat_window.config(state=tk.DISABLED)
+
+    def start_jarvis(self):
+        if not self.running:
+            self.running = True
+            self.stop_chat = False
+            self.add_text("JARVIS: Listening for JARVIS...")
+            self.start_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.NORMAL)
+            threading.Thread(target=chat_with_gpt, args=(self,)).start()
+
+    def stop_jarvis(self):
+        if self.running:
+            self.running = False
+            self.add_text("JARVIS: Current mission complete. Press start to try once more!...")
+            self.stop_button.config(state=tk.DISABLED)
+            self.start_button.config(state=tk.NORMAL)
+
+    def on_enter_pressed(self, event):
+        if self.running:
+            event_queue.put("pause")
+
+    def center_window(self):
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    gui = JarvisGUI(root)
+    root.mainloop()
